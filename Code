@@ -1,0 +1,68 @@
+# wqu-captone-project
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+!pip install arch
+from arch import arch_model
+
+# Step 1: Download Data
+data = yf.download("SPY", start="2010-01-01", end="2024-12-31")
+data['Return'] = data['Close'].pct_change().dropna()
+data = data.dropna()
+
+# Step 2: Fit a Symmetric GARCH(1,1) Model
+returns = data['Return'] * 100  # Scale returns for GARCH fitting
+garch_model = arch_model(returns, vol='Garch', p=1, q=1)  # Symmetric GARCH (no 'o' term)
+garch_fit = garch_model.fit(disp='off')
+
+# Step 3: Extract Conditional Volatility
+cond_vol = garch_fit.conditional_volatility / 100  # Bring back to original scale
+
+# Step 4: Calculate Volatility-Adjusted Returns
+data['Vol_Adjusted_Return'] = data['Return'] / cond_vol
+data['Cond_Volatility'] = cond_vol.values 
+# Step 5: Plot the Regular and Volatility-Adjusted Returns
+plt.figure(figsize=(14, 6))
+plt.plot(data.index, data['Vol_Adjusted_Return'], color='grey', label='GARCH volatility adjusted return', alpha=0.6)
+plt.plot(data.index, data['Return'], color='black', label='Return', alpha=0.8)
+plt.axhline(0, color='red', linestyle='--', linewidth=0.5)
+plt.title('Returns and GARCH Volatility Adjusted Returns')
+plt.xlabel('Date')
+plt.ylabel('Return')
+plt.legend()
+plt.grid(True)
+plt.show()
+# Step 6: Markov Chain (Hidden Markov Model) for Regime Detection
+!pip install hmmlearn
+from hmmlearn.hmm import GaussianHMM
+
+# Prepare the input: volatility-adjusted returns reshaped for HMM
+X = data['Vol_Adjusted_Return'].dropna().values.reshape(-1, 1)
+
+# Create and fit a 2-state HMM
+hmm_model = GaussianHMM(n_components=3, covariance_type="full", n_iter=1000)
+hmm_model.fit(X)
+
+# Predict hidden states (regimes)
+hidden_states = hmm_model.predict(X)
+
+# Add states to DataFrame
+data = data.iloc[-len(hidden_states):]  # Align the index (in case of any mismatch)
+data['Regime'] = hidden_states
+
+# Optional: Plot returns colored by regime
+plt.figure(figsize=(14,6))
+for i in range(hmm_model.n_components):
+    mask = (data['Regime'] == i)
+    plt.plot(data.index[mask], data['Return'][mask], '.', label=f'Regime {i}', alpha=0.7)
+    
+plt.title('SPY Returns by Markov Chain Regime')
+plt.xlabel('Date')
+plt.ylabel('Return')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+data.head()
