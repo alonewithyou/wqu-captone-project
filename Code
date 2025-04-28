@@ -1,11 +1,16 @@
-# wqu-captone-project
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-!pip install arch
-from arch import arch_model
 
+
+# Check and install 'arch' package if not installed
+try:
+    import arch
+except ImportError:
+    !pip install arch
+    import arch  # Try importing again after installation
+    from arch import arch_model
 # Step 1: Download Data
 data = yf.download("SPY", start="2010-01-01", end="2024-12-31")
 data['Return'] = data['Close'].pct_change().dropna()
@@ -20,25 +25,47 @@ garch_fit = garch_model.fit(disp='off')
 cond_vol = garch_fit.conditional_volatility / 100  # Bring back to original scale
 
 # Step 4: Calculate Volatility-Adjusted Returns
-data['Vol_Adjusted_Return'] = data['Return'] / cond_vol
-data['Cond_Volatility'] = cond_vol.values 
-# Step 5: Plot the Regular and Volatility-Adjusted Returns
-plt.figure(figsize=(14, 6))
-plt.plot(data.index, data['Vol_Adjusted_Return'], color='grey', label='GARCH volatility adjusted return', alpha=0.6)
-plt.plot(data.index, data['Return'], color='black', label='Return', alpha=0.8)
-plt.axhline(0, color='red', linestyle='--', linewidth=0.5)
-plt.title('Returns and GARCH Volatility Adjusted Returns')
-plt.xlabel('Date')
-plt.ylabel('Return')
-plt.legend()
-plt.grid(True)
-plt.show()
+data['GARCH_Adjusted_Return'] = data['Return'] / cond_vol
+#data['Cond_Volatility'] = cond_vol.values # GARCH VOL
+
+
+# GARCH(1,1) Model
+garch_model = arch_model(returns, vol='Garch', p=1, q=1)
+garch_fit = garch_model.fit(disp='off')
+data['GARCH_vol'] = np.nan
+data.loc[returns.index, 'GARCH_vol'] = garch_fit.conditional_volatility / 100
+
+# EGARCH(1,1) Model
+egarch_model = arch_model(returns, vol='EGARCH', p=1, q=1)
+egarch_fit = egarch_model.fit(disp='off')
+data['EGARCH_vol'] = np.nan
+data.loc[returns.index, 'EGARCH_vol'] = egarch_fit.conditional_volatility / 100
+
+
+# GJR-GARCH(1,1) Model
+gjr_model = arch_model(returns, vol='Garch', p=1, o=1, q=1)
+gjr_fit = gjr_model.fit(disp='off')
+data['GJR_vol'] = np.nan
+data.loc[returns.index, 'GJR_vol'] = gjr_fit.conditional_volatility / 100
+
+# APARCH(1,1) Model
+aparch_model = arch_model(returns, vol='APARCH', p=1, o=1, q=1)
+aparch_fit = aparch_model.fit(disp='off')
+data['APARCH_vol'] = np.nan
+data.loc[returns.index, 'APARCH_vol'] = aparch_fit.conditional_volatility / 100
+
+# IGARCH(1,1) Model (approximation)
+igarch_model = arch_model(returns, vol='Garch', p=1, q=1)
+igarch_fit = igarch_model.fit(disp='off')
+data['IGARCH_vol'] = np.nan
+data.loc[returns.index, 'IGARCH_vol'] = igarch_fit.conditional_volatility / 100
+
 # Step 6: Markov Chain (Hidden Markov Model) for Regime Detection
 !pip install hmmlearn
 from hmmlearn.hmm import GaussianHMM
 
-# Prepare the input: volatility-adjusted returns reshaped for HMM
-X = data['Vol_Adjusted_Return'].dropna().values.reshape(-1, 1)
+# Prepare the input: volatility adjusted returns reshaped for HMM
+X = data['Return'].dropna().values.reshape(-1, 1)
 
 # Create and fit a 2-state HMM
 hmm_model = GaussianHMM(n_components=3, covariance_type="full", n_iter=1000)
@@ -49,14 +76,18 @@ hidden_states = hmm_model.predict(X)
 
 # Add states to DataFrame
 data = data.iloc[-len(hidden_states):]  # Align the index (in case of any mismatch)
-data['Regime'] = hidden_states
+data['3STATE - RegimeS'] = hidden_states
 
+# adding target label for deep learning model training
+#data['Target'] = data['Return'].shift(-1)
+# Create Binary Target
+data['Target'] = (data['Return'].shift(-1) > 0.005).astype(int)
 # Optional: Plot returns colored by regime
 plt.figure(figsize=(14,6))
 for i in range(hmm_model.n_components):
-    mask = (data['Regime'] == i)
+    mask = (data['3STATE - RegimeS'] == i)
     plt.plot(data.index[mask], data['Return'][mask], '.', label=f'Regime {i}', alpha=0.7)
-    
+
 plt.title('SPY Returns by Markov Chain Regime')
 plt.xlabel('Date')
 plt.ylabel('Return')
@@ -64,5 +95,91 @@ plt.legend()
 plt.grid(True)
 plt.show()
 
+# Step 5: Plot the Regular and Volatility-Adjusted Returns
+plt.figure(figsize=(14, 6))
+plt.plot(data.index, data['GARCH_Adjusted_Return'], color='grey', label='GARCH volatility adjusted return', alpha=0.6)
+plt.plot(data.index, data['Return'], color='black', label='Return', alpha=0.8)
+plt.axhline(0, color='red', linestyle='--', linewidth=0.5)
+plt.title('Returns and GARCH Volatility Adjusted Returns')
+plt.xlabel('Date')
+plt.ylabel('Return')
+plt.legend()
+plt.grid(True)
+plt.show()
 
 data.head()
+
+####
+data.describe()
+
+# develop Deep learning model
+# Install TensorFlow
+try:
+    import arch
+except ImportError:
+    !pip install tensorflow
+
+# Import libraries
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, classification_report, ConfusionMatrixDisplay
+from tensorflow.keras.layers import LeakyReLU
+# Drop rows with NaNs (from shift(-1) and other operations)
+data = data.dropna()
+
+# Define Features and Target
+features = ['Volume','Return', 'GARCH_Adjusted_Return', 'GARCH_vol', 'EGARCH_vol', 'GJR_vol', 'APARCH_vol', 'IGARCH_vol', '3STATE - RegimeS']
+target = 'Target'
+
+X = data[features].values
+y = data[target].values
+
+# Train-Test Split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+# Normalize the Features
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# Build the Deep Learning Model
+model = tf.keras.Sequential([
+    tf.keras.layers.Dense(256, activation=LeakyReLU(alpha=0.01), input_shape=(X_train.shape[1],)),
+    tf.keras.layers.Dropout(0.3),
+    tf.keras.layers.Dense(128, activation=LeakyReLU(alpha=0.01)),
+    tf.keras.layers.Dropout(0.2),
+    tf.keras.layers.Dense(128, activation=LeakyReLU(alpha=0.01)),
+
+    tf.keras.layers.Dense(1, activation='sigmoid')
+])
+
+# Compile the Model
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# Train the Model
+history = model.fit(X_train, y_train, epochs=20, batch_size=64, validation_split=0.1)
+
+# Evaluate the Model
+loss, accuracy = model.evaluate(X_test, y_test)
+print(f"\nTest Loss: {loss:.6f}")
+print(f"Test Accuracy: {accuracy:.6f}")
+
+# Make Predictions
+y_pred_probs = model.predict(X_test)
+y_pred = (y_pred_probs > 0.5).astype(int)
+
+# --- CONFUSION MATRIX and CLASSIFICATION REPORT ---
+
+# Confusion Matrix
+cm = confusion_matrix(y_test, y_pred)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1])
+disp.plot(cmap=plt.cm.Blues)
+plt.title("Confusion Matrix")
+plt.show()
+
+# Classification Report
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, digits=4))
