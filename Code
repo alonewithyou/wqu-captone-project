@@ -3,6 +3,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Ensure 'arch' is installed and import 'arch_model'
+try:
+    from arch import arch_model
+except ImportError:
+    import subprocess
+    subprocess.check_call(["pip", "install", "arch"])
+    from arch import arch_model
 
 # Check and install 'arch' package if not installed
 try:
@@ -78,6 +85,22 @@ hidden_states = hmm_model.predict(X)
 data = data.iloc[-len(hidden_states):]  # Align the index (in case of any mismatch)
 data['3STATE - RegimeS'] = hidden_states
 
+
+### Volatility regiems -------------------------- added
+# Prepare the input: volatility adjusted returns reshaped for HMM
+G = data['GARCH_Adjusted_Return'].dropna().values.reshape(-1, 1)
+
+# Create and fit a 2-state HMM
+hmm_model_garch = GaussianHMM(n_components=3, covariance_type="full", n_iter=1000)
+hmm_model_garch.fit(G)
+
+# Predict hidden states (regimes)
+hidden_states_Garch = hmm_model_garch.predict(G)
+
+# Add states to DataFrame
+data = data.iloc[-len(hidden_states_Garch):]  # Align the index (in case of any mismatch)
+data['Garch_3_STATE-RegimeS'] = hidden_states_Garch
+
 # adding target label for deep learning model training
 #data['Target'] = data['Return'].shift(-1)
 # Create Binary Target
@@ -108,10 +131,76 @@ plt.grid(True)
 plt.show()
 
 data.head()
-
-####
 data.describe()
+#-------------------------------
+#              RSI
+#-------------------------------
+def compute_rsi_signal_only(prices, period=14):
+    delta = prices.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
 
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    signals = [0]  # First signal is hold
+
+    for i in range(1, len(rsi)):
+        try:
+            prev_rsi = rsi.iloc[i - 1].item()
+            curr_rsi = rsi.iloc[i].item()
+        except:
+            signals.append(0)
+            continue
+
+        if pd.isna(prev_rsi) or pd.isna(curr_rsi):
+            signals.append(0)
+        elif curr_rsi > 30 and prev_rsi <= 30:
+            signals.append(1)   # Buy
+        elif curr_rsi < 70 and prev_rsi >= 70:
+            signals.append(-1)  # Sell
+        else:
+            signals.append(0)   # Hold
+
+    return pd.Series(signals, index=prices.index)
+data['RSI_Signal'] = compute_rsi_signal_only(data['Close'])
+# --- MACD Indicator Feature with Discrete Signal Output ---
+#-------------------------------
+#              MACD
+#-------------------------------
+# Calculate MACD and Signal Line
+def compute_macd(close_prices, short=12, long=26, signal=9):
+    ema_short = close_prices.ewm(span=short, adjust=False).mean()
+    ema_long = close_prices.ewm(span=long, adjust=False).mean()
+    macd = ema_short - ema_long
+    macd_signal = macd.ewm(span=signal, adjust=False).mean()
+    return macd, macd_signal
+
+# Use the 'Return' as a proxy for price signal (or replace with 'Close' if available)
+macd_line, macd_signal = compute_macd(data['Return'])
+
+# Add MACD values to DataFrame
+data['MACD_Line'] = macd_line
+data['MACD_Signal'] = macd_signal
+
+# Generate discrete trading signals
+def macd_to_signal(macd, signal):
+    if macd > signal:
+        return 1   # Buy
+    elif macd < signal:
+        return -1  # Sell
+    else:
+        return 0   # Hold
+
+data['MACD_Signal_Label'] = [macd_to_signal(m, s) for m, s in zip(macd_line, macd_signal)]
+
+# OPTIONAL: Preview output
+
+data.drop(columns=['MACD_Line','MACD_Signal'])
+data
 # develop Deep learning model
 # Install TensorFlow
 try:
@@ -131,11 +220,12 @@ from tensorflow.keras.layers import LeakyReLU
 data = data.dropna()
 
 # Define Features and Target
-features = ['Volume','Return', 'GARCH_Adjusted_Return', 'GARCH_vol', 'EGARCH_vol', 'GJR_vol', 'APARCH_vol', 'IGARCH_vol', '3STATE - RegimeS']
+#features = ['Volume','Return', 'GARCH_Adjusted_Return', 'GARCH_vol', 'EGARCH_vol', 'GJR_vol', 'APARCH_vol', 'IGARCH_vol', '3STATE - RegimeS']
 target = 'Target'
-
-X = data[features].values
 y = data[target].values
+df = data.drop(columns=['Close','High','Low','Open','Target'])
+X = df.values
+
 
 # Train-Test Split
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
@@ -147,10 +237,10 @@ X_test = scaler.transform(X_test)
 
 # Build the Deep Learning Model
 model = tf.keras.Sequential([
-    tf.keras.layers.Dense(256, activation=LeakyReLU(alpha=0.01), input_shape=(X_train.shape[1],)),
-    tf.keras.layers.Dropout(0.3),
-    tf.keras.layers.Dense(128, activation=LeakyReLU(alpha=0.01)),
-    tf.keras.layers.Dropout(0.2),
+    tf.keras.layers.Dense(512, activation=LeakyReLU(alpha=0.01), input_shape=(X_train.shape[1],)),
+    tf.keras.layers.Dropout(0.5),
+    tf.keras.layers.Dense(256, activation=LeakyReLU(alpha=0.01)),
+    tf.keras.layers.Dropout(0.5),
     tf.keras.layers.Dense(128, activation=LeakyReLU(alpha=0.01)),
 
     tf.keras.layers.Dense(1, activation='sigmoid')
@@ -183,3 +273,127 @@ plt.show()
 # Classification Report
 print("\nClassification Report:")
 print(classification_report(y_test, y_pred, digits=4))
+# Ensure required packages are installed
+try:
+    import tensorflow as tf
+except ImportError:
+    !pip install tensorflow
+    import tensorflow as tf
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, classification_report, ConfusionMatrixDisplay
+from tensorflow.keras.layers import LSTM, Dense, Dropout, LeakyReLU
+from tensorflow.keras.models import Sequential
+import matplotlib.pyplot as plt
+
+# --- DATA PREPARATION ---
+
+# Drop NaNs
+data = data.dropna()
+
+# Define Features and Target
+features = ['Volume', 'Return', 'GARCH_Adjusted_Return', 'GARCH_vol', 'EGARCH_vol',
+            'GJR_vol', 'APARCH_vol', 'IGARCH_vol', '3STATE - RegimeS','Garch_3_STATE-RegimeS']
+target = 'Target'
+
+X = data[features].values
+y = data[target].values
+
+# Normalize the Features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# --- CREATE LSTM SEQUENCES ---
+sequence_length = 30
+
+def create_sequences(X, y, seq_len):
+    Xs, ys = [], []
+    for i in range(len(X) - seq_len):
+        Xs.append(X[i:i+seq_len])
+        ys.append(y[i+seq_len])
+    return np.array(Xs), np.array(ys)
+
+X_seq, y_seq = create_sequences(X_scaled, y, sequence_length)
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X_seq, y_seq, test_size=0.2, shuffle=False)
+
+# --- LSTM MODEL WITH HIDDEN LAYERS ---
+model = Sequential([
+    LSTM(64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
+    Dropout(0.3),
+    LSTM(32),
+    Dropout(0.3),
+    Dense(128),
+    LeakyReLU(alpha=0.01),
+    Dropout(0.2),
+    Dense(64),
+    LeakyReLU(alpha=0.01),
+    Dense(1, activation='sigmoid')
+])
+
+# Compile the model
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# Learning rate scheduler
+# Define callbacks
+lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
+    monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1
+)
+
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss', patience=5, restore_best_weights=True, verbose=1
+)
+
+# Train the model
+history = model.fit(
+    X_train, y_train,
+    epochs=50,
+    batch_size=64,
+    validation_split=0.1,
+    callbacks=[early_stopping, lr_callback],
+    verbose=1
+)
+
+
+# --- EVALUATION ---
+loss, accuracy = model.evaluate(X_test, y_test)
+print(f"\nTest Loss: {loss:.6f}")
+print(f"Test Accuracy: {accuracy:.6f}")
+
+# Predictions
+y_pred_probs = model.predict(X_test)
+y_pred = (y_pred_probs > 0.5).astype(int)
+
+# --- CONFUSION MATRIX and CLASSIFICATION REPORT ---
+cm = confusion_matrix(y_test, y_pred)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1])
+disp.plot(cmap=plt.cm.Blues)
+plt.title("LSTM with Hidden Layers - Confusion Matrix")
+plt.show()
+
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, digits=4))
+# check correlation between 3 states column
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Compute correlation
+corr_value = data[['3STATE - RegimeS', 'Garch_3_STATE-RegimeS']].corr().iloc[0, 1]
+print(f"Pearson Correlation: {corr_value:.4f}")
+
+# Heatmap visualization
+sns.heatmap(
+    data[['3STATE - RegimeS', 'Garch_3_STATE-RegimeS']].corr(),
+    annot=True, cmap='coolwarm', fmt=".2f"
+)
+plt.title("Correlation Between Regime Columns")
+plt.show()
+from scipy.stats import pearsonr
+
+corr, pval = pearsonr(data['3STATE - RegimeS'], data['Garch_3_STATE-RegimeS'])
+print(f"Pearson Correlation: {corr:.4f}")
+print(f"P-value: {pval:.4e}")
