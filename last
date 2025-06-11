@@ -1,0 +1,612 @@
+import random
+import numpy as np
+import tensorflow as tf
+
+# Set random seed for reproducibility
+SEED = 42
+np.random.seed(SEED)
+random.seed(SEED)
+tf.random.set_seed(SEED)
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Ensure 'arch' is installed and import 'arch_model'
+try:
+    from arch import arch_model
+except ImportError:
+    import subprocess
+    subprocess.check_call(["pip", "install", "arch"])
+    from arch import arch_model
+
+# Check and install 'arch' package if not installed
+try:
+    import arch
+except ImportError:
+    !pip install arch
+    import arch  # Try importing again after installation
+    from arch import arch_model
+# Step 1: Download Data
+data = yf.download("SPY", start="2010-01-01", end="2024-12-31")
+data['Return'] = data['Close'].pct_change().dropna()
+data = data.dropna()
+
+# Step 2: Fit a Symmetric GARCH(1,1) Model
+returns = data['Return'] * 100  # Scale returns for GARCH fitting
+garch_model = arch_model(returns, vol='Garch', p=1, q=1)  # Symmetric GARCH (no 'o' term)
+garch_fit = garch_model.fit(disp='off')
+
+# Step 3: Extract Conditional Volatility
+cond_vol = garch_fit.conditional_volatility / 100  # Bring back to original scale
+
+# Step 4: Calculate Volatility-Adjusted Returns
+data['GARCH_Adjusted_Return'] = data['Return'] / cond_vol
+#data['Cond_Volatility'] = cond_vol.values # GARCH VOL
+
+
+# GARCH(1,1) Model
+garch_model = arch_model(returns, vol='Garch', p=1, q=1)
+garch_fit = garch_model.fit(disp='off')
+data['GARCH_vol'] = np.nan
+data.loc[returns.index, 'GARCH_vol'] = garch_fit.conditional_volatility / 100
+
+# EGARCH(1,1) Model
+egarch_model = arch_model(returns, vol='EGARCH', p=1, q=1)
+egarch_fit = egarch_model.fit(disp='off')
+data['EGARCH_vol'] = np.nan
+data.loc[returns.index, 'EGARCH_vol'] = egarch_fit.conditional_volatility / 100
+
+
+# GJR-GARCH(1,1) Model
+gjr_model = arch_model(returns, vol='Garch', p=1, o=1, q=1)
+gjr_fit = gjr_model.fit(disp='off')
+data['GJR_vol'] = np.nan
+data.loc[returns.index, 'GJR_vol'] = gjr_fit.conditional_volatility / 100
+
+# APARCH(1,1) Model
+aparch_model = arch_model(returns, vol='APARCH', p=1, o=1, q=1)
+aparch_fit = aparch_model.fit(disp='off')
+data['APARCH_vol'] = np.nan
+data.loc[returns.index, 'APARCH_vol'] = aparch_fit.conditional_volatility / 100
+
+# IGARCH(1,1) Model (approximation)
+igarch_model = arch_model(returns, vol='Garch', p=1, q=1)
+igarch_fit = igarch_model.fit(disp='off')
+data['IGARCH_vol'] = np.nan
+data.loc[returns.index, 'IGARCH_vol'] = igarch_fit.conditional_volatility / 100
+
+# Step 6: Markov Chain (Hidden Markov Model) for Regime Detection
+!pip install hmmlearn
+from hmmlearn.hmm import GaussianHMM
+
+# Prepare the input: volatility adjusted returns reshaped for HMM
+X = data['Return'].dropna().values.reshape(-1, 1)
+
+# Create and fit a 2-state HMM
+hmm_model = GaussianHMM(n_components=3, covariance_type="full", n_iter=1000)
+hmm_model.fit(X)
+
+# Predict hidden states (regimes)
+hidden_states = hmm_model.predict(X)
+
+# Add states to DataFrame
+data = data.iloc[-len(hidden_states):]  # Align the index (in case of any mismatch)
+data['3STATE - RegimeS'] = hidden_states
+
+
+### Volatility regiems -------------------------- added
+# Prepare the input: volatility adjusted returns reshaped for HMM
+G = data['GARCH_Adjusted_Return'].dropna().values.reshape(-1, 1)
+
+# Create and fit a 2-state HMM
+hmm_model_garch = GaussianHMM(n_components=3, covariance_type="full", n_iter=1000)
+hmm_model_garch.fit(G)
+
+# Predict hidden states (regimes)
+hidden_states_Garch = hmm_model_garch.predict(G)
+
+# Add states to DataFrame
+data = data.iloc[-len(hidden_states_Garch):]  # Align the index (in case of any mismatch)
+data['Garch_3_STATE-RegimeS'] = hidden_states_Garch
+
+# adding target label for deep learning model training
+#data['Target'] = data['Return'].shift(-1)
+# Create Binary Target
+daily_r = 0.00077  #  threshold
+
+data['Target'] = data['Return'].shift(-1).apply(
+    lambda x: 1 if x > daily_r else (0 if x >= 0 else -1)
+)
+
+# Optional: Plot returns colored by regime
+plt.figure(figsize=(14,6))
+for i in range(hmm_model.n_components):
+    mask = (data['3STATE - RegimeS'] == i)
+    plt.plot(data.index[mask], data['Return'][mask], '.', label=f'Regime {i}', alpha=0.7)
+
+plt.title('SPY Returns by Markov Chain Regime')
+plt.xlabel('Date')
+plt.ylabel('Return')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Step 5: Plot the Regular and Volatility-Adjusted Returns
+plt.figure(figsize=(14, 6))
+plt.plot(data.index, data['GARCH_Adjusted_Return'], color='grey', label='GARCH volatility adjusted return', alpha=0.6)
+plt.plot(data.index, data['Return'], color='black', label='Return', alpha=0.8)
+plt.axhline(0, color='red', linestyle='--', linewidth=0.5)
+plt.title('Returns and GARCH Volatility Adjusted Returns')
+plt.xlabel('Date')
+plt.ylabel('Return')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+data.head()
+# Count how many 0s and 1s
+target_counts = data['Target'].value_counts()
+
+# Calculate percentages
+target_percentages = data['Target'].value_counts(normalize=True) * 100
+
+# Combine both
+summary = pd.DataFrame({
+    'Count': target_counts,
+    'Percentage': target_percentages.round(2)
+})
+
+print(summary)
+data.describe()
+#-------------------------------
+#              RSI
+#-------------------------------
+def compute_rsi_signal_only(prices, period=14):
+    delta = prices.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    signals = [0]  # First signal is hold
+
+    for i in range(1, len(rsi)):
+        try:
+            prev_rsi = rsi.iloc[i - 1].item()
+            curr_rsi = rsi.iloc[i].item()
+        except:
+            signals.append(0)
+            continue
+
+        if pd.isna(prev_rsi) or pd.isna(curr_rsi):
+            signals.append(0)
+        elif curr_rsi > 30 and prev_rsi <= 30:
+            signals.append(1)   # Buy
+        elif curr_rsi < 70 and prev_rsi >= 70:
+            signals.append(-1)  # Sell
+        else:
+            signals.append(0)   # Hold
+
+    return pd.Series(signals, index=prices.index)
+data['RSI_Signal'] = compute_rsi_signal_only(data['Close'])
+# --- MACD Indicator Feature with Discrete Signal Output ---
+#-------------------------------
+#              MACD
+#-------------------------------
+# Calculate MACD and Signal Line
+def compute_macd(close_prices, short=12, long=26, signal=9):
+    ema_short = close_prices.ewm(span=short, adjust=False).mean()
+    ema_long = close_prices.ewm(span=long, adjust=False).mean()
+    macd = ema_short - ema_long
+    macd_signal = macd.ewm(span=signal, adjust=False).mean()
+    return macd, macd_signal
+
+# Use the 'Return' as a proxy for price signal (or replace with 'Close' if available)
+macd_line, macd_signal = compute_macd(data['Return'])
+
+# Add MACD values to DataFrame
+data['MACD_Line'] = macd_line
+data['MACD_Signal'] = macd_signal
+
+# Generate discrete trading signals
+def macd_to_signal(macd, signal):
+    if macd > signal:
+        return 1   # Buy
+    elif macd < signal:
+        return -1  # Sell
+    else:
+        return 0   # Hold
+
+data['MACD_Signal_Label'] = [macd_to_signal(m, s) for m, s in zip(macd_line, macd_signal)]
+
+# OPTIONAL: Preview output
+
+data.drop(columns=['MACD_Line','MACD_Signal'])
+data
+data.groupby('Target').count()['Return']
+import tensorflow as tf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.utils import to_categorical
+from collections import Counter
+from sklearn.utils.class_weight import compute_class_weight
+
+# === CLEAN & PREPARE DATA ===
+data = data.dropna()
+
+data['Target'] = np.where(data['Target'] == -1, 0,
+                  np.where(data['Target'] == 0, 1, 2))  # 0=down, 1=neutral, 2=up
+
+print("Target Distribution:", Counter(data['Target']))
+
+X = data.drop(columns=['Close', 'High', 'Low', 'Open', 'Target']).values
+y = data['Target'].values
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+seq_len = 30
+
+def create_sequences(X, y, seq_len):
+    Xs, ys = [], []
+    for i in range(len(X) - seq_len):
+        Xs.append(X[i:i+seq_len])
+        ys.append(y[i+seq_len])
+    return np.array(Xs), np.array(ys)
+
+X_seq, y_seq = create_sequences(X_scaled, y, seq_len)
+y_seq_cat = to_categorical(y_seq, num_classes=3)
+
+splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+for train_idx, test_idx in splitter.split(X_seq, y_seq):
+    X_train, X_test = X_seq[train_idx], X_seq[test_idx]
+    y_train, y_test = y_seq_cat[train_idx], y_seq_cat[test_idx]
+    y_test_labels = y_seq[test_idx]
+
+# === COMPUTE CLASS WEIGHTS ===
+class_weights = compute_class_weight(class_weight='balanced',
+                                     classes=np.unique(y_seq),
+                                     y=y_seq)
+class_weight_dict = dict(enumerate(class_weights))
+print("Class Weights:", class_weight_dict)
+
+# === MODEL ===
+model = Sequential([
+    Input(shape=(X_train.shape[1], X_train.shape[2])),
+    LSTM(64),
+    Dropout(0.3),
+    Dense(32, activation='relu'),
+    Dense(3, activation='softmax')
+])
+
+model.compile(
+    loss='categorical_crossentropy',
+    optimizer='adam',
+    metrics=['accuracy']
+)
+
+# === CALLBACKS ===
+early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=7, restore_best_weights=True)
+lr_reduce = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', patience=3, verbose=1, factor=0.5)
+
+# === TRAIN ===
+history = model.fit(
+    X_train, y_train,
+    validation_split=0.1,
+    epochs=40,
+    batch_size=64,
+    callbacks=[early_stop, lr_reduce],
+    class_weight=class_weight_dict,
+    verbose=1
+)
+
+# === EVALUATE ===
+loss, accuracy = model.evaluate(X_test, y_test, verbose=0)
+print(f"\nTest Loss: {loss:.4f} | Test Accuracy: {accuracy:.4f}")
+
+# === PREDICT ===
+y_pred_probs = model.predict(X_test)
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+# === CONFUSION MATRIX ===
+cm = confusion_matrix(y_test_labels, y_pred, labels=[0, 1, 2])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1, 2])
+disp.plot(cmap=plt.cm.Blues)
+plt.title("Improved LSTM - Confusion Matrix")
+plt.grid(False)
+plt.show()
+
+# === CLASSIFICATION REPORT ===
+print("\nClassification Report:")
+print(classification_report(y_test_labels, y_pred, digits=4))
+plt.plot(history.history['accuracy'], label='Train Acc')
+plt.plot(history.history['val_accuracy'], label='Val Acc')
+plt.plot(history.history['loss'], label='Train Loss')
+plt.plot(history.history['val_loss'], label='Val Loss')
+plt.legend()
+plt.title('Training Curves')
+plt.grid(True)
+plt.show()
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, classification_report, ConfusionMatrixDisplay
+from tensorflow.keras.layers import Dense, Dropout, LeakyReLU
+
+# === CLEAN & PREPARE DATA ===
+# Drop rows with NaNs (from shift(-1) and other operations)
+data = data.dropna()
+
+# Re-map Target from (-1, 0, 1) → (0, 1, 2) for classification
+data['Target'] = np.where(data['Target'] == -1, 0,
+                  np.where(data['Target'] == 0, 1, 2))  # now: 0=down, 1=neutral, 2=up
+
+# Define features and target
+X = data.drop(columns=['Close', 'High', 'Low', 'Open', 'Target']).values
+y = data['Target'].values
+
+# === TRAIN-TEST SPLIT ===
+X_train = X[:754]
+y_train = y[:754]
+X_test = X[754:]
+y_test = y[754:]
+
+# === NORMALIZATION ===
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# === BUILD MODEL ===
+model = tf.keras.Sequential([
+    Dense(512, input_shape=(X_train.shape[1],)),
+    LeakyReLU(negative_slope=0.01),
+    Dropout(0.5),
+    Dense(256),
+    LeakyReLU(negative_slope=0.01),
+    Dropout(0.5),
+    Dense(128),
+    LeakyReLU(negative_slope=0.01),
+    Dense(3, activation='softmax')  # 3 classes
+])
+
+# === COMPILE ===
+model.compile(optimizer='adam',
+              loss='sparse_categorical_crossentropy',
+              metrics=['accuracy'])
+
+# === TRAIN ===
+history = model.fit(X_train, y_train, epochs=20, batch_size=64, validation_split=0.1)
+
+# === EVALUATE ===
+loss, accuracy = model.evaluate(X_test, y_test)
+print(f"\nTest Loss: {loss:.6f}")
+print(f"Test Accuracy: {accuracy:.6f}")
+
+# === PREDICT ===
+y_pred_probs = model.predict(X_test)
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+# === CONFUSION MATRIX ===
+cm = confusion_matrix(y_test, y_pred)
+labels = np.unique(np.concatenate((y_test, y_pred)))
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+disp.plot(cmap=plt.cm.Blues)
+plt.title("Confusion Matrix")
+plt.grid(False)
+plt.show()
+
+# === CLASSIFICATION REPORT ===
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, digits=4))
+len(data)
+import copy
+import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score  # Import accuracy_score
+
+# Get base predictions and accuracy (multi-class)
+y_base = np.argmax(model.predict(X_test), axis=1)
+baseline_acc = accuracy_score(y_test, y_base)
+
+# Compute importances
+importances = []
+for i in range(X_test.shape[1]):
+    X_test_permuted = copy.deepcopy(X_test)
+    np.random.shuffle(X_test_permuted[:, i])  # Shuffle the i-th feature
+
+    y_perm = np.argmax(model.predict(X_test_permuted), axis=1)
+    perm_acc = accuracy_score(y_test, y_perm)
+
+    importances.append(baseline_acc - perm_acc)
+
+# Ensure the feature names are correctly retrieved
+feature_names = X_test.columns if isinstance(X_test, pd.DataFrame) else [f"Feature {i}" for i in range(X_test.shape[1])]
+
+# Organize feature importance
+importance_df = pd.DataFrame({
+    'Feature': feature_names,
+    'Importance': importances
+}).sort_values(by='Importance', ascending=False)
+
+print(importance_df)
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# 1. Predict using trained model (ensure model & X_test already defined)
+y_pred_probs = model.predict(X_test)
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+# 2. Map predicted classes to trading signals
+pred_signal = pd.Series(y_pred, index=data.iloc[-len(y_pred):].index)
+pred_signal = pred_signal.map({0: 0, 1: 0, 2: 1})  # only Buy or Hold (no short)
+
+# 3. Shift signals to simulate real-time trading
+data['Signal'] = pred_signal.shift(1).reindex(data.index).fillna(0)
+
+# 4. Initialize trading logic columns
+data['Position'] = 0
+data['Buy_Price'] = np.nan
+data['Holding_Days'] = 0
+data['Action'] = ''
+strategy_returns = []
+
+# 5. Trading logic loop
+holding = False
+buy_price = None
+holding_days = 0
+
+for i in range(len(data)):
+    signal = data['Signal'].iloc[i].item()
+    price = data['Close'].iloc[i].item()
+    ret = data['Return'].iloc[i].item()
+
+    action = 'Hold'
+    strategy_return = 0
+
+    if not holding:
+        if signal == 1:
+            holding = True
+            buy_price = price
+            holding_days = 1
+            action = 'Buy'
+    else:
+        gain_pct = (price - buy_price) / buy_price
+
+        if gain_pct >= 0.10:
+            holding = False
+            action = 'Sell'
+            strategy_return = gain_pct
+        elif holding_days >= 4 and gain_pct > 0:
+            holding = False
+            action = 'Sell'
+            strategy_return = gain_pct
+        elif holding_days < 4 and gain_pct > 0.10:
+            holding = False
+            action = 'Sell'
+            strategy_return = gain_pct
+        else:
+            strategy_return = ret  # still holding
+
+        if holding:
+            holding_days += 1
+
+    # Save to DataFrame
+    data.iloc[i, data.columns.get_loc('Position')] = 1 if holding else 0
+    data.iloc[i, data.columns.get_loc('Buy_Price')] = buy_price if holding else np.nan
+    data.iloc[i, data.columns.get_loc('Holding_Days')] = holding_days if holding else 0
+    data.iloc[i, data.columns.get_loc('Action')] = action
+    strategy_returns.append(strategy_return if (holding or action == 'Sell') else 0)
+
+# 6. Add strategy return column
+data['Strategy_Return'] = strategy_returns
+
+# 7. Show last 10 trades
+print("Last 10 Trading Strategy Actions:\n")
+print(data[['Close', 'Return', 'Strategy_Return', 'Action']].tail(10))
+
+# 8. Plot signals
+plt.figure(figsize=(14, 6))
+plt.plot(data['Close'], label='SPY Price', color='black', alpha=0.7)
+
+buy_signals = data[data['Action'] == 'Buy']
+sell_signals = data[data['Action'] == 'Sell']
+
+plt.scatter(buy_signals.index, buy_signals['Close'], marker='^', color='green', label='Buy Signal', alpha=0.9)
+plt.scatter(sell_signals.index, sell_signals['Close'], marker='v', color='red', label='Sell Signal', alpha=0.9)
+
+plt.title('Trading Strategy: Buy/Sell on SPY Price')
+plt.xlabel('Date')
+plt.ylabel('SPY Price')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+# Make sure Strategy_Return has been computed
+if 'Strategy_Return' not in data.columns:
+    raise RuntimeError("Please run the trading strategy code first to generate 'Strategy_Return' column.")
+
+# Sharpe Ratio Calculation (Annualized)
+strategy_returns = data['Strategy_Return'].dropna()
+sharpe_ratio = (strategy_returns.mean() / strategy_returns.std()) * np.sqrt(252)
+
+# Cumulative Return Calculation
+data['Cumulative_Market'] = (1 + data['Return']).cumprod()
+data['Cumulative_Strategy'] = (1 + data['Strategy_Return']).cumprod()
+
+# Max Drawdown Calculation
+rolling_max = data['Cumulative_Strategy'].cummax()
+drawdown = (data['Cumulative_Strategy'] - rolling_max) / rolling_max
+max_drawdown = drawdown.min()
+
+# Performance Summary
+summary = {
+    "Sharpe Ratio": round(sharpe_ratio, 4),
+    "Max Drawdown": round(max_drawdown, 4),
+    "Final Strategy Return": round(data['Cumulative_Strategy'].iloc[-1] - 1, 4),
+    "Final Market Return": round(data['Cumulative_Market'].iloc[-1] - 1, 4)
+}
+
+print(" Performance Summary")
+for metric, value in summary.items():
+    print(f"{metric}: {value}")
+
+# Plotting Cumulative Returns
+plt.figure(figsize=(14, 6))
+plt.plot(data['Cumulative_Market'], label='Market (Buy & Hold)', linewidth=2)
+plt.plot(data['Cumulative_Strategy'], label='Model-Based Strategy', linewidth=2)
+plt.title('Backtest: Cumulative Returns of Strategy vs Market')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Return')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Example: Ensure Strategy_Return is available
+if 'Strategy_Return' not in data.columns:
+    raise RuntimeError("Run the trading strategy code first to compute 'Strategy_Return'.")
+
+# Compute cumulative returns if not already available
+if 'Cumulative_Strategy' not in data.columns:
+    data['Cumulative_Strategy'] = (1 + data['Strategy_Return']).cumprod()
+
+# Compute rolling maximum
+rolling_max = data['Cumulative_Strategy'].cummax()
+
+# Compute drawdown
+drawdown = (data['Cumulative_Strategy'] - rolling_max) / rolling_max
+max_drawdown = drawdown.min()
+max_drawdown_date = drawdown.idxmin()
+
+# Plot drawdown
+plt.figure(figsize=(14, 5))
+plt.plot(drawdown, color='orange', label='Drawdown')
+plt.axhline(max_drawdown, color='red', linestyle='--', label=f'Max Drawdown: {max_drawdown:.2%}')
+plt.title('Max Drawdown of Strategy')
+plt.xlabel('Date')
+plt.ylabel('Drawdown')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Print max drawdown
+print(f" Maximum Drawdown: {max_drawdown:.2%} on {max_drawdown_date.date()}")
+
